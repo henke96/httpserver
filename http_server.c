@@ -99,7 +99,9 @@ int main(int argc, char *argv[]) {
                     int start_position = client_socket_infos_position;
                     while (1) {
                         struct Client_socket_info *client_socket_info = client_socket_infos + client_socket_infos_position;
-                        ++client_socket_infos_position;
+                        if (++client_socket_infos_position == MAX_CLIENTS) {
+                            client_socket_infos_position = 0;
+                        }
                         if (client_socket_info->fd == -1) {
                             struct epoll_event new_socket_event;
                             new_socket_event.events = EPOLLIN | EPOLLET;
@@ -138,11 +140,13 @@ int main(int argc, char *argv[]) {
                     if (read_size < 0) {
                         if (errno != EAGAIN && errno != EWOULDBLOCK) {
                             perror("Error recieving message from client, closing it");
+                            client_socket_info->fd = -1;
                             close(fd);
                         }
                         break;
                     } else if (read_size == 0) {
                         printf("Recieved 0 bytes, closing client with fd %d\n", fd);
+                        client_socket_info->fd = -1;
                         close(fd);
                         break;
                     } else {
