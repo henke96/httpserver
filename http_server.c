@@ -7,17 +7,20 @@
 #include <errno.h>
 #include <string.h>
 #include <sys/epoll.h>
+#include <sys/types.h>
+#include <dirent.h>
 
 #define HOST_PORT 80
 #define MAX_CONNECTION_QUEUE 128
 #define MAX_EPOLL_EVENTS 64
 #define MAX_CLIENTS 2048
 #define MAX_RESPONSES 2048 // Can (should) be made dynamic
+#define MAX_RESPONSE_PATH_LENGTH 128
 
 #define RECIEVE_BUFFER_SIZE 1000
 
 void send_404_response(int client_fd);
-void load_responses();
+int load_responses();
 
 struct response {
     char *url;
@@ -45,7 +48,10 @@ struct response responses[MAX_RESPONSES];
 struct response *responses_end;
 
 int main(int argc, char *argv[]) {
-    load_responses();
+    responses_end = responses;
+    if (!load_responses()) {
+        return 1;
+    }
 
     int listen_socket_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
 
@@ -227,11 +233,98 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
-void load_responses() {
-    responses->url = "test";
-    responses->response = "HTTP/1.1 200 OK\r\nContent-Length:38\r\nContent-Type: text/html\r\n\r\n<html><body>Hello World!</body></html>";
-    responses->response_length = strlen(responses->response);
-    responses_end = responses + 1;
+int load_responses() {
+    char file_path[MAX_RESPONSE_PATH_LENGTH] = "./responses/";
+    char *file_name_start = file_path + 12;
+    DIR *response_directory = opendir(file_path);
+    if (response_directory == NULL) {
+        perror("Error opening directory \"./responses\"");
+        return 0;
+    }
+    struct response *responses_array_end = responses + MAX_RESPONSES;
+
+    struct dirent* entry;
+    while (1) {
+        entry = readdir(response_directory);
+        if (entry == NULL) {
+            break;
+        }
+        if (entry->d_type == DT_DIR) {
+            continue;
+        }
+        if (responses_end == responses_array_end) {
+            fprintf(stderr, "Reached limit of %d responses", MAX_RESPONSES);
+            break;
+        }
+        char *path_pos = file_name_start;
+        char *file_name_pos = entry->d_name;
+        while (*file_name_pos != 0) {
+            *path_pos = *file_name_pos;
+            ++path_pos;
+            ++file_name_pos;
+            if (path_pos > file_path + MAX_RESPONSE_PATH_LENGTH) {
+                fprintf(stderr, "File name too long %s\n", entry->d_name);
+                continue;
+            }
+        }
+        *path_pos = 0;
+        printf("%s\n", file_path);
+        FILE *entry_file = fopen(file_path, "rb");
+        if (entry_file == NULL) {
+            perror("Failed to open response file");
+            continue;
+        }
+        fseek(entry_file, 0, SEEK_END);
+        long file_size = ftell(entry_file);
+        if (file_size < 0) {
+            perror("Failed to determine file size");
+            continue;
+        }
+        rewind(entry_file);
+        int digit_order = 10;
+        int digits = 1;
+        while (file_size >= digit_order) {
+            ++digits;
+            digit_order *= 10;
+        }
+        int response_length = 32 + digits + 4 + file_size; 
+        responses_end->response = malloc(response_length);
+        char *response_pos = responses_end->response;
+        if (response_pos == NULL) {
+            fprintf(stderr, "Failed to allocate memory for response file: %s\n", entry->d_name);
+            continue;
+        };
+        char *start_response_pos = "HTTP/1.1 200 OK\r\nContent-Length:";
+        char *start_response_end = start_response_pos + 32;
+        while (start_response_pos < start_response_end) {
+            *response_pos = *start_response_pos;
+            ++response_pos;
+            ++start_response_pos; 
+        }
+        int size_copy = file_size;
+        while (digit_order > 9) {
+            digit_order /= 10;
+            int digit_value = size_copy / digit_order;
+            size_copy -= digit_value * digit_order;
+            *response_pos = '0' + digit_value;
+            printf("%c\n", *response_pos);
+            ++response_pos;
+        }
+        *response_pos = '\r';
+        *(++response_pos) = '\n';
+        *(++response_pos) = '\r';
+        *(++response_pos) = '\n';
+        ++response_pos;
+        if (fread(response_pos, 1, file_size, entry_file) != (size_t)file_size) {
+            fprintf(stderr, "Failed to read whole response file: %s\n", entry->d_name);
+            continue;
+        }
+        fclose(entry_file);
+        responses_end->response_length = response_length;
+        responses_end->url = entry->d_name;
+        ++responses_end;
+    }
+    return 1;
 }
 
 void send_404_response(int client_fd) {
